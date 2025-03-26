@@ -174,27 +174,20 @@ func (c *client) writePlanProviderConfig(outputDir string, planContents, planCon
 	}
 
 	configContents := []byte(fmt.Sprintf(`
-terraform {
-  required_providers {
-    stateful = {
-      source = "github.com/ashald/stateful"
-      version = "~> 1.0"
-    }
-  }
+resource "terraform_data" "plan_output" {
+  input = %s
 }
-resource "stateful_string" "plan_output" {
-  desired = %s
+resource "terraform_data" "plan_output_json" {
+  input = %s
 }
-resource "stateful_string" "plan_output_json" {
-  desired = %s
+
+output "%s" {
+  sensitive = true
+  value = terraform_data.plan_output.output
 }
 output "%s" {
   sensitive = true
-  value = stateful_string.plan_output.desired
-}
-output "%s" {
-  sensitive = true
-  value = stateful_string.plan_output_json.desired
+  value = terraform_data.plan_output_json.output
 }
 `, escapedPlan, escapedJSONPlan, models.PlanContent, models.PlanContentJSON))
 
@@ -787,7 +780,7 @@ func (c *client) SavePlanToBackend(planEnvName string) error {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// TODO: this stateful set and reset isn't great
+	// TODO: this terraform_data set and reset isn't great
 	origDir, err := os.Getwd()
 	if err != nil {
 		return err
@@ -859,7 +852,7 @@ func (c *client) GetPlanFromBackend(planEnvName string) error {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// TODO: this stateful set and reset isn't great
+	// TODO: this terraform_data set and reset isn't great
 	origDir, err := os.Getwd()
 	if err != nil {
 		return err
