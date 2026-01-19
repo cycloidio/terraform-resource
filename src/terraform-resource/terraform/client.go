@@ -974,6 +974,7 @@ func (c *client) terraformCmd(args []string, env []string) (*runner.Runner, erro
 	cmd.Dir = c.model.Source
 	cmd.Env = os.Environ()
 	cmd.Env = append(cmd.Env, "CHECKPOINT_DISABLE=1")
+	cmd.Env = append(cmd.Env, "TF_PLUGIN_CACHE_DIR=/var/tmp/providers")
 	// TODO: remove the following line once this issue is fixed:
 	// https://github.com/hashicorp/terraform/issues/17655
 	cmd.Env = append(cmd.Env, "TF_WARN_OUTPUT_ERRORS=1")
