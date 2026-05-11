@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/ljfranklin/terraform-resource/encoder"
+	"github.com/ljfranklin/terraform-resource/helper"
 	"github.com/ljfranklin/terraform-resource/logger"
 	"github.com/ljfranklin/terraform-resource/models"
 	"github.com/ljfranklin/terraform-resource/storage"
@@ -101,10 +102,28 @@ func (r Runner) inWithBackend(req models.InRequest, tmpDir string) (models.InRes
 
 	targetEnvName := req.Version.EnvName
 
+	// If plan and http backend, use plan URL
+	origBackendConfig := terraformModel.BackendConfig
+	if req.Version.IsPlan() && terraformModel.BackendType == "http" {
+		planAddress, err := helper.PlanAddressForHTTPBackend(terraformModel.BackendConfig)
+		if err != nil {
+			return models.InResponse{}, err
+		}
+		terraformModel.BackendConfig["address"] = planAddress
+	}
+
 	client := terraform.NewClient(
 		terraformModel,
 		r.LogWriter,
 	)
+
+	// Rollback address change in case of http backend and tfplan
+	defer func() {
+		if req.Version.IsPlan() && terraformModel.BackendType == "http" {
+			terraformModel.BackendConfig = origBackendConfig
+			client.SetModel(terraformModel)
+		}
+	}()
 
 	if err := client.InitWithBackend(); err != nil {
 		return models.InResponse{}, err
@@ -138,8 +157,16 @@ func (r Runner) inWithBackend(req models.InRequest, tmpDir string) (models.InRes
 }
 
 func (r Runner) writeBackendOutputs(req models.InRequest, targetEnvName string, client terraform.Client) (models.InResponse, error) {
-	if err := r.ensureEnvExistsInBackend(targetEnvName, client); err != nil {
-		return models.InResponse{}, err
+	terraformModel := req.Source.Terraform.Merge(req.Params.Terraform)
+	if err := terraformModel.Validate(); err != nil {
+		return models.InResponse{}, fmt.Errorf("Failed to validate terraform Model: %s", err)
+	}
+	terraformModel.Source = "."
+
+	if terraformModel.BackendType != "http" {
+		if err := r.ensureEnvExistsInBackend(targetEnvName, client); err != nil {
+			return models.InResponse{}, err
+		}
 	}
 
 	tfOutput, err := client.Output(targetEnvName)

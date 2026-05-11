@@ -4,7 +4,7 @@ ARG TARGETARCH
 
 RUN apk update && \
    apk --no-cache add ca-certificates git bash wget gnupg zip unzip make \
-                      openssh-client build-base curl
+                      openssh-client build-base curl jq
 
 # this glibc compatibility module is needed for some downloaded binaries,
 # such as aws cli, to run in provisioners.

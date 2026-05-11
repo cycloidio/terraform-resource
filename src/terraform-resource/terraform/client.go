@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/ljfranklin/terraform-resource/helper"
 	"github.com/ljfranklin/terraform-resource/models"
 	"github.com/ljfranklin/terraform-resource/runner"
 )
@@ -118,7 +119,16 @@ func (c *client) InitWithBackend() error {
 }
 
 func (c *client) writeBackendConfig(outputDir string) (string, error) {
-	configContents, err := json.Marshal(c.model.BackendConfig)
+	bc := make(map[string]interface{})
+	for key, value := range c.model.BackendConfig {
+		bc[key] = value
+	}
+
+	if _, ok := c.model.BackendConfig["plan_address"]; ok && c.model.BackendType == "http" {
+		delete(bc, "plan_address")
+	}
+
+	configContents, err := json.Marshal(bc)
 	if err != nil {
 		return "", err
 	}
@@ -164,27 +174,20 @@ func (c *client) writePlanProviderConfig(outputDir string, planContents, planCon
 	}
 
 	configContents := []byte(fmt.Sprintf(`
-terraform {
-  required_providers {
-    stateful = {
-      source = "github.com/ashald/stateful"
-      version = "~> 1.0"
-    }
-  }
+resource "terraform_data" "plan_output" {
+  input = %s
 }
-resource "stateful_string" "plan_output" {
-  desired = %s
+resource "terraform_data" "plan_output_json" {
+  input = %s
 }
-resource "stateful_string" "plan_output_json" {
-  desired = %s
+
+output "%s" {
+  sensitive = true
+  value = terraform_data.plan_output.output
 }
 output "%s" {
   sensitive = true
-  value = stateful_string.plan_output.desired
-}
-output "%s" {
-  sensitive = true
-  value = stateful_string.plan_output_json.desired
+  value = terraform_data.plan_output_json.output
 }
 `, escapedPlan, escapedJSONPlan, models.PlanContent, models.PlanContentJSON))
 
@@ -392,6 +395,9 @@ func (c *client) Output(envName string) (map[string]map[string]interface{}, erro
 		"output",
 		"-json",
 	}
+	if c.model.BackendType == "http" {
+		envName = defaultWorkspace
+	}
 	outputCmd, err := c.terraformCmd(outputArgs, []string{
 		fmt.Sprintf("TF_WORKSPACE=%s", envName),
 	})
@@ -540,6 +546,9 @@ func (c *client) ImportWithLegacyStorage() error {
 }
 
 func (c *client) WorkspaceList() ([]string, error) {
+	if c.model.BackendType == "http" {
+		return []string{defaultWorkspace}, nil
+	}
 	cmd, err := c.terraformCmd([]string{
 		"workspace",
 		"list",
@@ -566,6 +575,9 @@ func (c *client) WorkspaceList() ([]string, error) {
 }
 
 func (c *client) WorkspaceSelect(envName string) error {
+	if c.model.BackendType == "http" {
+		return nil
+	}
 	cmd, err := c.terraformCmd([]string{
 		"workspace",
 		"select",
@@ -583,6 +595,10 @@ func (c *client) WorkspaceSelect(envName string) error {
 }
 
 func (c *client) WorkspaceNewIfNotExists(envName string) error {
+	if c.model.BackendType == "http" {
+		return nil
+	}
+
 	workspaces, err := c.WorkspaceList()
 
 	if err != nil {
@@ -617,6 +633,9 @@ func (c *client) WorkspaceNewIfNotExists(envName string) error {
 }
 
 func (c *client) WorkspaceNewFromExistingStateFile(envName string, localStateFilePath string) error {
+	if c.model.BackendType == "http" {
+		return nil
+	}
 	cmd, err := c.terraformCmd([]string{
 		"workspace",
 		"new",
@@ -647,7 +666,7 @@ func (c *client) WorkspaceNewFromExistingStateFile(envName string, localStateFil
 }
 
 func (c *client) WorkspaceDelete(envName string) error {
-	if envName == defaultWorkspace {
+	if envName == defaultWorkspace || c.model.BackendType == "http" {
 		return nil
 	}
 
@@ -670,7 +689,7 @@ func (c *client) WorkspaceDelete(envName string) error {
 }
 
 func (c *client) WorkspaceDeleteWithForce(envName string) error {
-	if envName == defaultWorkspace {
+	if envName == defaultWorkspace || c.model.BackendType == "http" {
 		return nil
 	}
 
@@ -694,6 +713,9 @@ func (c *client) WorkspaceDeleteWithForce(envName string) error {
 }
 
 func (c *client) StatePull(envName string) ([]byte, error) {
+	if c.model.BackendType == "http" {
+		envName = defaultWorkspace
+	}
 	cmd, err := c.terraformCmd([]string{
 		"state",
 		"pull",
@@ -758,13 +780,14 @@ func (c *client) SavePlanToBackend(planEnvName string) error {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// TODO: this stateful set and reset isn't great
+	// TODO: this terraform_data set and reset isn't great
 	origDir, err := os.Getwd()
 	if err != nil {
 		return err
 	}
 	origSource := c.model.Source
 	origLogger := c.logWriter
+	origBackendConfig := c.model.BackendConfig
 
 	err = os.Chdir(tmpDir)
 	if err != nil {
@@ -784,6 +807,7 @@ func (c *client) SavePlanToBackend(planEnvName string) error {
 		os.Chdir(origDir)
 		c.model.Source = origSource
 		c.logWriter = origLogger
+		c.model.BackendConfig = origBackendConfig
 	}()
 
 	// The /tmp/tf-plan.log file can contain credentials, so we tell the user to
@@ -792,6 +816,15 @@ func (c *client) SavePlanToBackend(planEnvName string) error {
 	err = c.writePlanProviderConfig(tmpDir, planContents, planContentsJSON)
 	if err != nil {
 		return fmt.Errorf(errPrefix, logPath, err)
+	}
+
+	// Override the backendConfig for HTTP type in order to target a different "-plan"
+	if c.model.BackendType == "http" {
+		planAddress, err := helper.PlanAddressForHTTPBackend(c.model.BackendConfig)
+		if err != nil {
+			return err
+		}
+		c.model.BackendConfig["address"] = planAddress
 	}
 
 	err = c.InitWithBackend()
@@ -813,6 +846,46 @@ func (c *client) SavePlanToBackend(planEnvName string) error {
 }
 
 func (c *client) GetPlanFromBackend(planEnvName string) error {
+	tmpDir, err := ioutil.TempDir("", "tf-resource-plan")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// TODO: this terraform_data set and reset isn't great
+	origDir, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	origSource := c.model.Source
+	origBackendConfig := c.model.BackendConfig
+
+	err = os.Chdir(tmpDir)
+	if err != nil {
+		return err
+	}
+	c.model.Source = tmpDir
+	defer func() {
+		os.Chdir(origDir)
+		c.model.Source = origSource
+		c.model.BackendConfig = origBackendConfig
+	}()
+	// Override the backendConfig for HTTP type in order to target a different "-plan"
+	if c.model.BackendType == "http" {
+		planAddress, err := helper.PlanAddressForHTTPBackend(c.model.BackendConfig)
+		if err != nil {
+			return err
+		}
+		c.model.BackendConfig["address"] = planAddress
+	}
+
+	// Run again the init as we change directory.
+	// This should init to get the tfplan, then let the regular workflow get back on the previously init dir due to the defer func()
+	err = c.InitWithBackend()
+	if err != nil {
+		return fmt.Errorf("init failed %s", err)
+	}
+
 	if err := c.WorkspaceSelect(planEnvName); err != nil {
 		return err
 	}
@@ -846,6 +919,9 @@ func (c *client) SetModel(model models.Terraform) {
 }
 
 func (c *client) resourceExists(tfID string, envName string) (bool, error) {
+	if c.model.BackendType == "http" {
+		envName = defaultWorkspace
+	}
 	cmd, err := c.terraformCmd([]string{
 		"state",
 		"list",
@@ -898,6 +974,7 @@ func (c *client) terraformCmd(args []string, env []string) (*runner.Runner, erro
 	cmd.Dir = c.model.Source
 	cmd.Env = os.Environ()
 	cmd.Env = append(cmd.Env, "CHECKPOINT_DISABLE=1")
+	cmd.Env = append(cmd.Env, "TF_PLUGIN_CACHE_DIR=/var/tmp/providers")
 	// TODO: remove the following line once this issue is fixed:
 	// https://github.com/hashicorp/terraform/issues/17655
 	cmd.Env = append(cmd.Env, "TF_WARN_OUTPUT_ERRORS=1")
